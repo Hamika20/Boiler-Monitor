@@ -1,0 +1,12 @@
+dist/
+build/
+.ufbt/
+*.fap
+*.o
+*.elf
+*.map
+*.impsymins
+*.bin
+*.hex
+.DS_Store
+Thumbs.db
