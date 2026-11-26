@@ -1,0 +1,13 @@
+App(
+    appid="boiler_monitor",
+    name="Boiler Monitor",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="boiler_monitor_app",
+    stack_size=2 * 1024,
+    requires=["gui"],
+    fap_category="Tools",
+    fap_version="0.1",
+    fap_description="DHT11 monitor with configurable Sub-GHz threshold presets.",
+    fap_author="Hamika20",
+    fap_icon="boiler_monitor.png",
+)
