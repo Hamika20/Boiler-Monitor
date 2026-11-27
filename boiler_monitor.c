@@ -29,11 +29,11 @@
 #define CONFIG_DIR     "/ext/apps_data/boiler_monitor"
 #define CONFIG_PATH    CONFIG_DIR "/config.bin"
 #define CONFIG_MAGIC   0x424D5031U
-#define CONFIG_VERSION   3U
+#define CONFIG_VERSION 3U
 #define DHT_READ_MS    2000U
 #define TX_RETRY_MS    2000U
-#define MIN_TARGET_C     0.0f
-#define MAX_TARGET_C     30.0f
+#define MIN_TARGET_C   0.0f
+#define MAX_TARGET_C   30.0f
 #define SUB_PATH_SIZE  256U
 
 static const uint32_t tx_intervals_sec[] = {10, 15, 30, 60, 300, 900, 1800, 3600};
@@ -176,6 +176,24 @@ static float config_get_threshold(const PresetConfig* config) {
     return config->send_target == SendTargetAbove ? config->above_temp : config->below_temp;
 }
 
+static void update_condition(BoilerMonitorApp* app, uint32_t now) {
+    bool above_target = app->config.send_target == SendTargetAbove;
+    float threshold = config_get_threshold(&app->config);
+    bool enters_condition = above_target ? app->temperature_c >= threshold :
+                                           app->temperature_c <= threshold;
+    bool exits_condition = above_target ? app->temperature_c < threshold :
+                                          app->temperature_c > threshold;
+    if(!app->condition_active && enters_condition) {
+        app->condition_active = true;
+        app->once_sent = false;
+        app->next_tx_tick = now;
+    } else if(app->condition_active && exits_condition) {
+        app->condition_active = false;
+        app->once_sent = false;
+        if(app->armed) app->tx_status = "Condition cleared";
+    }
+}
+
 static float temperature_to_display(const PresetConfig* config, float temperature_c) {
     return config->temperature_unit == TemperatureUnitFahrenheit ?
                temperature_c * 9.0f / 5.0f + 32.0f :
@@ -188,7 +206,8 @@ static void format_temperature(
     char* output,
     size_t output_size) {
     if(config->temperature_unit == TemperatureUnitFahrenheit) {
-        snprintf(output, output_size, "%.0f", (double)temperature_to_display(config, temperature_c));
+        snprintf(
+            output, output_size, "%.0f", (double)temperature_to_display(config, temperature_c));
     } else {
         snprintf(output, output_size, "%.1f", (double)temperature_c);
     }
@@ -558,7 +577,8 @@ static void draw_callback(Canvas* canvas, void* context) {
     snprintf(
         set_label,
         sizeof(set_label),
-        "SET U/D (%c)",
+        "SET %s (%c)",
+        app->config.send_target == SendTargetAbove ? ">" : "<",
         app->config.temperature_unit == TemperatureUnitCelsius ? 'C' : 'F');
     canvas_draw_str_aligned(canvas, 32, 21, AlignCenter, AlignBottom, now_label);
     canvas_draw_str_aligned(canvas, 96, 21, AlignCenter, AlignBottom, set_label);
@@ -573,8 +593,7 @@ static void draw_callback(Canvas* canvas, void* context) {
             sizeof(big_now),
             app->config.temperature_unit == TemperatureUnitCelsius ? "--.-" : "---");
     }
-    format_temperature(
-        &app->config, config_get_threshold(&app->config), big_set, sizeof(big_set));
+    format_temperature(&app->config, config_get_threshold(&app->config), big_set, sizeof(big_set));
 
     canvas_set_font(canvas, FontBigNumbers);
     canvas_draw_str_aligned(canvas, 32, 38, AlignCenter, AlignBottom, big_now);
@@ -604,8 +623,9 @@ static void draw_callback(Canvas* canvas, void* context) {
     char tx_info[20];
     if(app->sensor_error) {
         snprintf(tx_info, sizeof(tx_info), "WAIT:SENSOR");
-    } else if(app->armed && app->condition_active &&
-       (app->config.send_mode == SendModeInterval || !app->once_sent)) {
+    } else if(
+        app->armed && app->condition_active &&
+        (app->config.send_mode == SendModeInterval || !app->once_sent)) {
         uint32_t now = furi_get_tick();
         uint32_t remaining = (int32_t)(app->next_tx_tick - now) > 0 ?
                                  ((app->next_tx_tick - now) / furi_kernel_get_tick_frequency()) :
@@ -641,9 +661,9 @@ static void adjust_config_value(PresetConfig* config, PresetMenuItem item, int8_
                                                                        SendTargetAbove;
         break;
     case MenuTemperatureUnit:
-        config->temperature_unit =
-            config->temperature_unit == TemperatureUnitCelsius ? TemperatureUnitFahrenheit :
-                                                                 TemperatureUnitCelsius;
+        config->temperature_unit = config->temperature_unit == TemperatureUnitCelsius ?
+                                       TemperatureUnitFahrenheit :
+                                       TemperatureUnitCelsius;
         break;
     case MenuSendMode:
         config->send_mode = config->send_mode == SendModeOnce ? SendModeInterval : SendModeOnce;
@@ -666,8 +686,7 @@ static void adjust_config_value(PresetConfig* config, PresetMenuItem item, int8_
 }
 
 static void adjust_active_threshold(PresetConfig* config, int8_t delta) {
-    float step_c = config->temperature_unit == TemperatureUnitFahrenheit ? (5.0f / 9.0f) :
-                                                                           0.5f;
+    float step_c = config->temperature_unit == TemperatureUnitFahrenheit ? (5.0f / 9.0f) : 0.5f;
     if(config->send_target == SendTargetAbove) {
         float value = config->above_temp + (delta > 0 ? step_c : -step_c);
         if(value <= MAX_TARGET_C && value >= MIN_TARGET_C) {
@@ -797,12 +816,17 @@ int32_t boiler_monitor_app(void* context) {
                     if(previous_target != app.config.send_target) {
                         app.condition_active = false;
                         app.once_sent = false;
+                        if(app.has_reading && !app.sensor_error) {
+                            update_condition(&app, furi_get_tick());
+                        }
                     }
                     if(previous_mode != app.config.send_mode) {
-                        app.once_sent = app.config.send_mode == SendModeOnce &&
-                                        app.condition_active;
-                        app.next_tx_tick =
-                            furi_get_tick() + furi_ms_to_ticks(app.config.tx_interval_sec * 1000U);
+                        app.once_sent = false;
+                        app.next_tx_tick = furi_get_tick();
+                        if(app.config.send_mode == SendModeInterval) {
+                            app.next_tx_tick +=
+                                furi_ms_to_ticks(app.config.tx_interval_sec * 1000U);
+                        }
                     }
                 }
             } else if(event.key == InputKeyOk && event.type == InputTypeShort) {
@@ -816,12 +840,17 @@ int32_t boiler_monitor_app(void* context) {
                     if(previous_target != app.config.send_target) {
                         app.condition_active = false;
                         app.once_sent = false;
+                        if(app.has_reading && !app.sensor_error) {
+                            update_condition(&app, furi_get_tick());
+                        }
                     }
                     if(previous_mode != app.config.send_mode) {
-                        app.once_sent = app.config.send_mode == SendModeOnce &&
-                                        app.condition_active;
-                        app.next_tx_tick =
-                            furi_get_tick() + furi_ms_to_ticks(app.config.tx_interval_sec * 1000U);
+                        app.once_sent = false;
+                        app.next_tx_tick = furi_get_tick();
+                        if(app.config.send_mode == SendModeInterval) {
+                            app.next_tx_tick +=
+                                furi_ms_to_ticks(app.config.tx_interval_sec * 1000U);
+                        }
                     }
                 }
             }
@@ -854,22 +883,7 @@ int32_t boiler_monitor_app(void* context) {
                 app.temperature_c = reading.temperature_c;
                 app.humidity_percent = reading.humidity_percent;
                 app.has_reading = true;
-                now = furi_get_tick();
-                bool above_target = app.config.send_target == SendTargetAbove;
-                float threshold = config_get_threshold(&app.config);
-                bool enters_condition = above_target ? app.temperature_c >= threshold :
-                                                       app.temperature_c <= threshold;
-                bool exits_condition =
-                    above_target ? app.temperature_c < threshold : app.temperature_c > threshold;
-                if(!app.condition_active && enters_condition) {
-                    app.condition_active = true;
-                    app.once_sent = false;
-                    app.next_tx_tick = now;
-                } else if(app.condition_active && exits_condition) {
-                    app.condition_active = false;
-                    app.once_sent = false;
-                    if(app.armed) app.tx_status = "Condition cleared";
-                }
+                update_condition(&app, furi_get_tick());
             }
             furi_mutex_release(app.mutex);
         }
